@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 DB_PATH = os.path.join(os.path.dirname(__file__), "rep.db")
 START_TIME = time.time()
 
+# Users who have sent /add and are waiting to send a file or link
+PENDING_ADD: set[int] = set()
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -56,13 +59,15 @@ def init_db():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to *Rep* — the shared file vault!\n\n"
-        "Send any *video*, *file*, or *link* (http/https) and it will be stored for everyone.\n\n"
+        "ðŸ‘‹ Welcome to *Rep* â€” the shared file vault!\n\n"
+        "â€¢ *Videos* are saved automatically whenever you send one.\n"
+        "â€¢ *Documents and links* require */add* first, then send the file or URL.\n\n"
         "Commands:\n"
-        "• /list — see how many files and links are saved\n"
-        "• /send — get everything (files + links)\n"
-        "• /files — get only saved files\n"
-        "• /links — get only saved links\n\n"
+        "â€¢ /add â€” arm the bot to save your next document or link\n"
+        "â€¢ /list â€” see how many files and links are saved\n"
+        "â€¢ /send â€” get everything (files + links)\n"
+        "â€¢ /files â€” get only saved files\n"
+        "â€¢ /links â€” get only saved links\n\n"
         "To *search*, just type any keyword and I'll find matching files and links.",
         parse_mode="Markdown",
     )
@@ -70,39 +75,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "*Rep Bot — Command Reference*\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "*Saving items (shared by all users)*\n"
-        "• Send a *video* → saved to the shared vault\n"
-        "• Send a *file/document* → saved to the shared vault\n"
-        "• Send a *link* (http/https) → saved to the shared vault\n"
-        "_Example: https://example.com/report.pdf_\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "*Rep Bot â€” Command Reference*\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
+        "*Saving videos*\n"
+        "Send any *video* â€” it is saved automatically, no command needed.\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
+        "*Saving documents and links (explicit /add required)*\n"
+        "1. Send */add*\n"
+        "2. Immediately send a *file/document* or *link* (http/https)\n"
+        "The item is saved to the shared vault.\n"
+        "_Without /add, documents and links are ignored._\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
+        "*/add*\n"
+        "Arms the bot to save your next document or link. One item per /add.\n"
+        "_Example: /add â†’ then send a file or URL_\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
         "*/list*\n"
-        "Shows a summary of everything in the shared vault, broken down by type.\n"
-        "_Example: /list_\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Shows a summary of everything in the shared vault.\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
         "*/send*\n"
-        "Sends all shared files and links back to you.\n"
-        "_Example: /send_\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Sends all shared files and links back to you.\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
         "*/files*\n"
-        "Sends only the shared files (videos and documents), without links.\n"
-        "_Example: /files_\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Sends only the shared files (videos and documents).\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
         "*/links*\n"
-        "Sends only the shared links, without any files.\n"
-        "_Example: /links_\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Sends only the shared links.\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
         "*Search (keyword)*\n"
-        "Type any word or phrase (not a command, not a URL) to search the shared vault. "
-        "Finds all files whose name contains the keyword and all links whose URL contains it — "
-        "partial and case-insensitive.\n"
-        "_Example: report → finds \"report.pdf\", \"https://site.com/report\"_\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "*/ping* — Check the bot is alive and see its uptime\n"
-        "*/start* — Show the welcome message\n"
-        "*/help* or */commands* — Show this reference",
+        "Type any word or phrase (not a command, not a URL) to search the vault.\n"
+        "Finds files by name and links by URL â€” partial, case-insensitive.\n"
+        "_Example: report â†’ finds \"report.pdf\", \"https://site.com/report\"_\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
+        "*/ping* â€” Check the bot is alive and see its uptime\n"
+        "*/start* â€” Show the welcome message\n"
+        "*/help* or */commands* â€” Show this reference",
         parse_mode="Markdown",
     )
 
@@ -126,6 +133,14 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Pong! Bot is alive.\nUptime: {uptime_str}")
 
 
+async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    PENDING_ADD.add(user_id)
+    await update.message.reply_text(
+        "Ready to save. Send your file or link now."
+    )
+
+
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     video = update.message.video or update.message.video_note
@@ -143,6 +158,10 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if user_id not in PENDING_ADD:
+        return
+
+    PENDING_ADD.discard(user_id)
     doc = update.message.document
     file_id = doc.file_id
     file_name = doc.file_name or "file"
@@ -162,6 +181,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
 
     if text.startswith("http://") or text.startswith("https://"):
+        if user_id not in PENDING_ADD:
+            return
+
+        PENDING_ADD.discard(user_id)
         with get_db() as conn:
             conn.execute(
                 "INSERT INTO links (user_id, url) VALUES (?, ?)",
@@ -225,7 +248,7 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not file_rows and link_count == 0:
         await update.message.reply_text(
-            "The shared vault is empty. Send a video, file, or link to get started!"
+            "The shared vault is empty. Use /add then send a file or link to get started!"
         )
         return
 
@@ -236,11 +259,11 @@ async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = row["cnt"]
         total += count
         label = "video" if row["file_type"] == "video" else "document"
-        lines.append(f"• {count} {label}{'s' if count != 1 else ''}")
+        lines.append(f"â€¢ {count} {label}{'s' if count != 1 else ''}")
 
     if link_count > 0:
         total += link_count
-        lines.append(f"• {link_count} link{'s' if link_count != 1 else ''}")
+        lines.append(f"â€¢ {link_count} link{'s' if link_count != 1 else ''}")
 
     await update.message.reply_text(
         f"The shared vault has *{total}* item{'s' if total != 1 else ''}:\n" + "\n".join(lines),
@@ -261,7 +284,7 @@ async def send_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if total == 0:
         await update.message.reply_text(
-            "The shared vault is empty. Send a video, file, or link to get started!"
+            "The shared vault is empty. Use /add then send a file or link to get started!"
         )
         return
 
@@ -292,7 +315,7 @@ async def send_only_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not file_rows:
         await update.message.reply_text(
-            "No files in the shared vault yet. Send a video or document to get started!"
+            "No files in the shared vault yet. Use /add then send a file to get started!"
         )
         return
 
@@ -322,7 +345,7 @@ async def send_only_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not link_rows:
         await update.message.reply_text(
-            "No links in the shared vault yet. Send a URL (http/https) to get started!"
+            "No links in the shared vault yet. Use /add then send a URL to get started!"
         )
         return
 
@@ -351,6 +374,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", help_command))
     app.add_handler(CommandHandler("list", list_files))
@@ -405,13 +429,13 @@ def start_self_ping(url: str, interval: int = 240) -> None:
             time.sleep(interval)
             try:
                 urllib.request.urlopen(url, timeout=10)
-                logger.info("Self-ping OK → %s", url)
+                logger.info("Self-ping OK â†’ %s", url)
             except Exception as e:
                 logger.warning("Self-ping failed: %s", e)
 
     thread = threading.Thread(target=ping, daemon=True)
     thread.start()
-    logger.info("Self-ping active every %ds → %s", interval, url)
+    logger.info("Self-ping active every %ds â†’ %s", interval, url)
 
 
 if __name__ == "__main__":
@@ -442,5 +466,5 @@ if __name__ == "__main__":
             logger.info("Bot stopped by user.")
             break
         except Exception:
-            logger.error("Bot crashed — restarting in %ds...\n%s", RETRY_DELAY, traceback.format_exc())
+            logger.error("Bot crashed â€” restarting in %ds...\n%s", RETRY_DELAY, traceback.format_exc())
             time.sleep(RETRY_DELAY)
