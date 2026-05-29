@@ -209,33 +209,68 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def change_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, file_name FROM files WHERE file_name IS NOT NULL AND file_name != ''"
-        ).fetchall()
+    # Step 1 â€” read all existing file names
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, file_name FROM files WHERE file_name IS NOT NULL AND file_name != ''"
+    ).fetchall()
+    conn.close()
 
-        updated = 0
-        skipped = 0
-        for row in rows:
-            cleaned = normalize_filename(row["file_name"])
-            if cleaned and cleaned != row["file_name"]:
-                conn.execute(
-                    "UPDATE files SET file_name = ? WHERE id = ?",
-                    (cleaned, row["id"]),
-                )
-                updated += 1
-            else:
-                skipped += 1
-        conn.commit()
-
-    total = len(rows)
-    if total == 0:
+    if not rows:
         await update.message.reply_text("No file names found in the vault to clean.")
         return
 
+    # Step 2 â€” build list of (id, old_name, new_name) for every name that changes
+    changes = []
+    for row in rows:
+        cleaned = normalize_filename(row["file_name"])
+        if cleaned and cleaned != row["file_name"]:
+            changes.append((row["id"], row["file_name"], cleaned))
+
+    if not changes:
+        await update.message.reply_text(
+            f"All *{len(rows)}* file name{'s are' if len(rows) != 1 else ' is'} already clean. Nothing changed.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Step 3 â€” open a fresh connection, apply every UPDATE, commit, close
+    conn2 = sqlite3.connect(DB_PATH)
+    for file_id, _, new_name in changes:
+        conn2.execute(
+            "UPDATE files SET file_name = ? WHERE id = ?",
+            (new_name, file_id),
+        )
+    conn2.commit()
+    conn2.close()
+
+    # Step 4 â€” verify by reading back from DB with a third connection
+    conn3 = sqlite3.connect(DB_PATH)
+    conn3.row_factory = sqlite3.Row
+    verified = {
+        row["id"]: row["file_name"]
+        for row in conn3.execute(
+            "SELECT id, file_name FROM files WHERE id IN ({})".format(
+                ",".join("?" * len(changes))
+            ),
+            [c[0] for c in changes],
+        ).fetchall()
+    }
+    conn3.close()
+
+    # Step 5 â€” report results confirmed from DB
+    preview_lines = []
+    for file_id, old_name, new_name in changes[:5]:
+        saved = verified.get(file_id, "?")
+        preview_lines.append(f"â€¢ {old_name}\n  â†’ *{saved}*")
+    preview = "\n".join(preview_lines)
+    if len(changes) > 5:
+        preview += f"\n_(and {len(changes) - 5} moreâ€¦)_"
+
     await update.message.reply_text(
-        f"Done. Cleaned *{updated}* file name{'s' if updated != 1 else ''} "
-        f"({skipped} already clean).",
+        f"Saved. *{len(changes)}* file name{'s' if len(changes) != 1 else ''} permanently updated "
+        f"({len(rows) - len(changes)} already clean):\n\n{preview}",
         parse_mode="Markdown",
     )
 
