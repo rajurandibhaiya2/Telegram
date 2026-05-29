@@ -1,5 +1,4 @@
 import os
-import re
 import sqlite3
 import logging
 import time
@@ -41,56 +40,6 @@ def in_save_mode(user_id: int) -> bool:
     return True
 
 
-_UNWANTED_PHRASES = [
-    r'sex\s+compilation',
-    r'sex\s+scenes?',
-    r'erotic\s+scenes?',
-    r'hentai\s+scenes?',
-    r'xxx\s+scenes?',
-    r'compilation',
-]
-_UNWANTED_RE = re.compile(
-    r'\s*(' + '|'.join(_UNWANTED_PHRASES) + r').*$',
-    flags=re.IGNORECASE,
-)
-
-
-def normalize_filename(name: str) -> str:
-    if not name:
-        return name
-
-    # Remove website domain prefix e.g. "EPORNER.COM - " or "SpankBang.com_"
-    name = re.sub(
-        r'^\S+\.(com|net|org|tv|xxx|co)\s*[-_\s]+',
-        '', name, flags=re.IGNORECASE,
-    )
-
-    # Remove IDs in square brackets e.g. [fPBMZ6coK7a]
-    name = re.sub(r'\[[a-zA-Z0-9]+\]', '', name)
-
-    # Replace underscores and plus signs with spaces
-    name = name.replace('_', ' ').replace('+', ' ')
-
-    # Remove resolution patterns e.g. 720p, 1080p, (720), (1080), 60fps
-    name = re.sub(r'\s*\(\d{3,4}\)', '', name)
-    name = re.sub(r'\b\d{3,4}p\b', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'\b\d+fps\b', '', name, flags=re.IGNORECASE)
-
-    # Remove unwanted phrases and everything after them
-    name = _UNWANTED_RE.sub('', name)
-
-    # Replace hyphens with spaces (handles slug-style filenames)
-    name = name.replace('-', ' ')
-
-    # Remove trailing episode number ranges e.g. "1 and 2" or "1 4"
-    name = re.sub(
-        r'\s+\d+(\s+(and\s+)?\d+)*\s*$', '', name, flags=re.IGNORECASE,
-    )
-
-    # Collapse whitespace
-    return re.sub(r'\s+', ' ', name).strip()
-
-
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -128,7 +77,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "â€¢ Save mode turns off automatically â€” nothing is saved outside of it.\n\n"
         "Commands:\n"
         "â€¢ /add â€” start a 60-second save window\n"
-        "â€¢ /change â€” clean and rename all stored file titles\n"
         "â€¢ /list â€” see how many files and links are saved\n"
         "â€¢ /send â€” get everything (files + links)\n"
         "â€¢ /files â€” get only saved files\n"
@@ -151,11 +99,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/add*\n"
         "Opens a 60-second save window. Send as many items as you like during that time.\n"
         "_Example: /add â†’ then send videos, files, or links_\n\n"
-        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
-        "*/change*\n"
-        "Cleans and renames all stored file titles. Removes website names, IDs, resolutions, "
-        "and phrases like 'sex scenes' or 'erotic scenes', keeping only the clean main title.\n"
-        "_Example: /change â†’ EPORNER.COM - [abc123] Ane chijo (1080) becomes 'Ane chijo'_\n\n"
         "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
         "*/list*\n"
         "Shows a summary of everything in the shared vault.\n\n"
@@ -205,73 +148,6 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SAVE_MODE_EXPIRY[user_id] = time.time() + SAVE_MODE_DURATION
     await update.message.reply_text(
         "Save mode on for 60 seconds. Send any videos, files, or links now â€” all will be saved. Save mode turns off automatically after 1 minute."
-    )
-
-
-async def change_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Step 1 â€” read all existing file names
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, file_name FROM files WHERE file_name IS NOT NULL AND file_name != ''"
-    ).fetchall()
-    conn.close()
-
-    if not rows:
-        await update.message.reply_text("No file names found in the vault to clean.")
-        return
-
-    # Step 2 â€” build list of (id, old_name, new_name) for every name that changes
-    changes = []
-    for row in rows:
-        cleaned = normalize_filename(row["file_name"])
-        if cleaned and cleaned != row["file_name"]:
-            changes.append((row["id"], row["file_name"], cleaned))
-
-    if not changes:
-        await update.message.reply_text(
-            f"All *{len(rows)}* file name{'s are' if len(rows) != 1 else ' is'} already clean. Nothing changed.",
-            parse_mode="Markdown",
-        )
-        return
-
-    # Step 3 â€” open a fresh connection, apply every UPDATE, commit, close
-    conn2 = sqlite3.connect(DB_PATH)
-    for file_id, _, new_name in changes:
-        conn2.execute(
-            "UPDATE files SET file_name = ? WHERE id = ?",
-            (new_name, file_id),
-        )
-    conn2.commit()
-    conn2.close()
-
-    # Step 4 â€” verify by reading back from DB with a third connection
-    conn3 = sqlite3.connect(DB_PATH)
-    conn3.row_factory = sqlite3.Row
-    verified = {
-        row["id"]: row["file_name"]
-        for row in conn3.execute(
-            "SELECT id, file_name FROM files WHERE id IN ({})".format(
-                ",".join("?" * len(changes))
-            ),
-            [c[0] for c in changes],
-        ).fetchall()
-    }
-    conn3.close()
-
-    # Step 5 â€” report results confirmed from DB
-    preview_lines = []
-    for file_id, old_name, new_name in changes[:5]:
-        saved = verified.get(file_id, "?")
-        preview_lines.append(f"â€¢ {old_name}\n  â†’ *{saved}*")
-    preview = "\n".join(preview_lines)
-    if len(changes) > 5:
-        preview += f"\n_(and {len(changes) - 5} moreâ€¦)_"
-
-    await update.message.reply_text(
-        f"Saved. *{len(changes)}* file name{'s' if len(changes) != 1 else ''} permanently updated "
-        f"({len(rows) - len(changes)} already clean):\n\n{preview}",
-        parse_mode="Markdown",
     )
 
 
@@ -509,7 +385,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("add", add_command))
-    app.add_handler(CommandHandler("change", change_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", help_command))
     app.add_handler(CommandHandler("list", list_files))
