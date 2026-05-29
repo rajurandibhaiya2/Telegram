@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import logging
 import time
@@ -24,8 +25,70 @@ logger = logging.getLogger(__name__)
 DB_PATH = os.path.join(os.path.dirname(__file__), "rep.db")
 START_TIME = time.time()
 
-# Users who have sent /add and are waiting to send a file or link
-PENDING_ADD: set[int] = set()
+SAVE_MODE_DURATION = 60  # seconds
+
+# Maps user_id â†’ timestamp when save mode expires
+SAVE_MODE_EXPIRY: dict[int, float] = {}
+
+
+def in_save_mode(user_id: int) -> bool:
+    expiry = SAVE_MODE_EXPIRY.get(user_id)
+    if expiry is None:
+        return False
+    if time.time() > expiry:
+        SAVE_MODE_EXPIRY.pop(user_id, None)
+        return False
+    return True
+
+
+_UNWANTED_PHRASES = [
+    r'sex\s+compilation',
+    r'sex\s+scenes?',
+    r'erotic\s+scenes?',
+    r'hentai\s+scenes?',
+    r'xxx\s+scenes?',
+    r'compilation',
+]
+_UNWANTED_RE = re.compile(
+    r'\s*(' + '|'.join(_UNWANTED_PHRASES) + r').*$',
+    flags=re.IGNORECASE,
+)
+
+
+def normalize_filename(name: str) -> str:
+    if not name:
+        return name
+
+    # Remove website domain prefix e.g. "EPORNER.COM - " or "SpankBang.com_"
+    name = re.sub(
+        r'^\S+\.(com|net|org|tv|xxx|co)\s*[-_\s]+',
+        '', name, flags=re.IGNORECASE,
+    )
+
+    # Remove IDs in square brackets e.g. [fPBMZ6coK7a]
+    name = re.sub(r'\[[a-zA-Z0-9]+\]', '', name)
+
+    # Replace underscores and plus signs with spaces
+    name = name.replace('_', ' ').replace('+', ' ')
+
+    # Remove resolution patterns e.g. 720p, 1080p, (720), (1080), 60fps
+    name = re.sub(r'\s*\(\d{3,4}\)', '', name)
+    name = re.sub(r'\b\d{3,4}p\b', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b\d+fps\b', '', name, flags=re.IGNORECASE)
+
+    # Remove unwanted phrases and everything after them
+    name = _UNWANTED_RE.sub('', name)
+
+    # Replace hyphens with spaces (handles slug-style filenames)
+    name = name.replace('-', ' ')
+
+    # Remove trailing episode number ranges e.g. "1 and 2" or "1 4"
+    name = re.sub(
+        r'\s+\d+(\s+(and\s+)?\d+)*\s*$', '', name, flags=re.IGNORECASE,
+    )
+
+    # Collapse whitespace
+    return re.sub(r'\s+', ' ', name).strip()
 
 
 def get_db():
@@ -60,10 +123,12 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "ðŸ‘‹ Welcome to *Rep* â€” the shared file vault!\n\n"
-        "â€¢ *Videos* are saved automatically whenever you send one.\n"
-        "â€¢ *Documents and links* require */add* first, then send the file or URL.\n\n"
+        "â€¢ Send */add* to enter save mode for *60 seconds*.\n"
+        "â€¢ During that time, all videos, files, and links you send are saved.\n"
+        "â€¢ Save mode turns off automatically â€” nothing is saved outside of it.\n\n"
         "Commands:\n"
-        "â€¢ /add â€” arm the bot to save your next document or link\n"
+        "â€¢ /add â€” start a 60-second save window\n"
+        "â€¢ /change â€” clean and rename all stored file titles\n"
         "â€¢ /list â€” see how many files and links are saved\n"
         "â€¢ /send â€” get everything (files + links)\n"
         "â€¢ /files â€” get only saved files\n"
@@ -77,18 +142,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "*Rep Bot â€” Command Reference*\n\n"
         "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
-        "*Saving videos*\n"
-        "Send any *video* â€” it is saved automatically, no command needed.\n\n"
-        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
-        "*Saving documents and links (explicit /add required)*\n"
-        "1. Send */add*\n"
-        "2. Immediately send a *file/document* or *link* (http/https)\n"
-        "The item is saved to the shared vault.\n"
-        "_Without /add, documents and links are ignored._\n\n"
+        "*Saving files, videos, and links*\n"
+        "1. Send */add* â€” enters save mode for *60 seconds*\n"
+        "2. Send any videos, files, or links during those 60 seconds â€” all are saved\n"
+        "3. Save mode turns off automatically after 1 minute\n"
+        "_Nothing is saved outside of save mode._\n\n"
         "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
         "*/add*\n"
-        "Arms the bot to save your next document or link. One item per /add.\n"
-        "_Example: /add â†’ then send a file or URL_\n\n"
+        "Opens a 60-second save window. Send as many items as you like during that time.\n"
+        "_Example: /add â†’ then send videos, files, or links_\n\n"
+        "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
+        "*/change*\n"
+        "Cleans and renames all stored file titles. Removes website names, IDs, resolutions, "
+        "and phrases like 'sex scenes' or 'erotic scenes', keeping only the clean main title.\n"
+        "_Example: /change â†’ EPORNER.COM - [abc123] Ane chijo (1080) becomes 'Ane chijo'_\n\n"
         "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n\n"
         "*/list*\n"
         "Shows a summary of everything in the shared vault.\n\n"
@@ -135,14 +202,49 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    PENDING_ADD.add(user_id)
+    SAVE_MODE_EXPIRY[user_id] = time.time() + SAVE_MODE_DURATION
     await update.message.reply_text(
-        "Ready to save. Send your file or link now."
+        "Save mode on for 60 seconds. Send any videos, files, or links now â€” all will be saved. Save mode turns off automatically after 1 minute."
+    )
+
+
+async def change_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, file_name FROM files WHERE file_name IS NOT NULL AND file_name != ''"
+        ).fetchall()
+
+        updated = 0
+        skipped = 0
+        for row in rows:
+            cleaned = normalize_filename(row["file_name"])
+            if cleaned and cleaned != row["file_name"]:
+                conn.execute(
+                    "UPDATE files SET file_name = ? WHERE id = ?",
+                    (cleaned, row["id"]),
+                )
+                updated += 1
+            else:
+                skipped += 1
+        conn.commit()
+
+    total = len(rows)
+    if total == 0:
+        await update.message.reply_text("No file names found in the vault to clean.")
+        return
+
+    await update.message.reply_text(
+        f"Done. Cleaned *{updated}* file name{'s' if updated != 1 else ''} "
+        f"({skipped} already clean).",
+        parse_mode="Markdown",
     )
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if not in_save_mode(user_id):
+        return
+
     video = update.message.video or update.message.video_note
     file_id = video.file_id
 
@@ -158,10 +260,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in PENDING_ADD:
+    if not in_save_mode(user_id):
         return
-
-    PENDING_ADD.discard(user_id)
     doc = update.message.document
     file_id = doc.file_id
     file_name = doc.file_name or "file"
@@ -181,10 +281,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
 
     if text.startswith("http://") or text.startswith("https://"):
-        if user_id not in PENDING_ADD:
+        if not in_save_mode(user_id):
             return
 
-        PENDING_ADD.discard(user_id)
         with get_db() as conn:
             conn.execute(
                 "INSERT INTO links (user_id, url) VALUES (?, ?)",
@@ -375,6 +474,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("add", add_command))
+    app.add_handler(CommandHandler("change", change_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", help_command))
     app.add_handler(CommandHandler("list", list_files))
